@@ -1,0 +1,50 @@
+packages:
+  - apps/*
+  - packages/*
+
+catalog:
+  '@types/node': ^24.19.2
+  '@types/express': ^5.0.6
+  '@types/supertest': ^7.2.1
+  bullmq: ^6.3.13
+  drizzle-orm: ^0.45.4
+  express: ^5.3.0
+  ioredis: ^6.0.0
+  pg: ^8.23.1
+  '@types/pg': ^8.23.1
+  supertest: ^7.3.1
+  tsup: ^8.5.1
+  tsx: ^4.23.15
+  vitest: ^5.0.4
+  zod: ^4.6.7
+
+minimumReleaseAgeExclude:
+  - '@vitest/mocker@5.0.4'
+  - '@vitest/spy@5.0.4'
+  - vitest@5.0.4
+  - zod@4.6.7
+  - bullmq@6.3.13
+
+# pnpm 11 blocks dependency lifecycle scripts by default; decide explicitly.
+allowBuilds:
+  # Optional native msgpack decoder used by BullMQ (prebuilt binaries).
+  msgpackr-extract: true
+  # Postinstall only checks protobufjs-cli version; not needed at runtime.
+  protobufjs: false
+  # Verifies/installs the platform binary used by tsup, tsx and drizzle-kit.
+  esbuild: true
+  # Install-time analytics pulled in by swagger-ui-dist.
+  '@scarf/scarf': false
+  # Optional native speedups for ssh2 (testcontainers' SSH transport); local Docker socket is used.
+  ssh2: false
+  cpu-features: false
+
+# Transitive only: node-domexception and glob via auto-instrumentations-node → resource-detector-gcp
+# → gaxios; glob also via testcontainers (dev). Acknowledged so installs stay warning-free.
+# Re-check on OTel/testcontainers bumps.
+allowedDeprecatedVersions:
+  glob: 10.5.0
+  node-domexception: 1.0.0
+  # Direct deps of drizzle-kit 0.31 (latest stable); dev-only CLI.
+  '@esbuild-kit/core-utils': 3.3.2
+  '@esbuild-kit/esm-loader': 2.6.5

@@ -1,0 +1,143 @@
+name: express-boilerplate
+
+# Default: infrastructure only.  `--profile apps` also starts the services.
+# Run through the root scripts (`pnpm infra:up`), which pass `--env-file .env`: the same root
+# .env feeds variable interpolation here and every app container (env_file).
+#
+# Exposure: only gateway is published to the network. api and the workers are reachable only
+# inside the compose network (http://api:3001). Infra ports are bound to 127.0.0.1 so host-run
+# `pnpm dev`, migrations and integration tests can reach them, but nothing else can.
+
+x-app: &app
+  profiles: [apps]
+  restart: unless-stopped
+  env_file: ../.env
+  depends_on: &app-deps
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    lgtm: { condition: service_healthy }
+
+# Container-only overrides of .env: every localhost address becomes a service hostname, so no
+# container inherits an address that only works on the host.
+x-app-env: &app-env
+  NODE_ENV: production
+  LOG_LEVEL: info
+  DATABASE_URL: postgres://${POSTGRES_USER:?run via pnpm infra:up (needs .env)}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:?}
+  REDIS_URL: redis://redis:6379
+  S3_ENDPOINT: http://minio:9000
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
+  API_URL: http://api:3001
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?}
+    ports: ['127.0.0.1:5432:5432']
+    volumes:
+      # Postgres 18+ images keep PGDATA under /var/lib/postgresql/<major>/docker.
+      - postgres_data:/var/lib/postgresql
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    # AOF persistence: queued jobs survive restarts. noeviction: BullMQ keys must never be evicted.
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    ports: ['127.0.0.1:6379:6379']
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    # minio/minio images are no longer published; pgsty/minio is a maintained community fork
+    # that keeps the web console.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    command: ['server', '/data', '--console-address', ':9001']
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?}
+    ports:
+      # S3 API must be reachable by clients using presigned URLs (S3_PUBLIC_ENDPOINT). Locally that
+      # is this machine; in production put it behind a public storage/CDN host.
+      - '127.0.0.1:9000:9000'
+      - '127.0.0.1:9001:9001' # console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:9000/minio/health/live']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  lgtm:
+    # Grafana + Loki + Tempo + Prometheus/Mimir + OTel Collector in one image (dev only).
+    image: grafana/otel-lgtm:0.36.0
+    ports:
+      - '127.0.0.1:3000:3000' # Grafana
+      - '127.0.0.1:4317:4317' # OTLP gRPC
+      - '127.0.0.1:4318:4318' # OTLP HTTP
+    volumes:
+      - lgtm_data:/data
+    healthcheck:
+      # Bundled script: checks Grafana, Loki, Tempo, Prometheus and the OTel Collector.
+      test: ['CMD', '/otel-lgtm/docker/healthcheck.sh']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  gateway:
+    <<: *app
+    build: { context: .., dockerfile: Dockerfile, args: { APP: gateway } }
+    # The only published app port: the public entry point.
+    ports: ['8080:8080']
+    environment:
+      <<: *app-env
+      PORT: 8080
+    depends_on:
+      <<: *app-deps
+      api: { condition: service_started }
+
+  api:
+    <<: *app
+    build: { context: .., dockerfile: Dockerfile, args: { APP: api } }
+    environment:
+      <<: *app-env
+      PORT: 3001
+    depends_on:
+      <<: *app-deps
+      minio: { condition: service_healthy }
+
+  generation-worker:
+    <<: *app
+    build: { context: .., dockerfile: Dockerfile, args: { APP: generation-worker } }
+    environment:
+      <<: *app-env
+      PORT: 3002
+    depends_on:
+      <<: *app-deps
+      minio: { condition: service_healthy }
+
+  notification:
+    <<: *app
+    build: { context: .., dockerfile: Dockerfile, args: { APP: notification } }
+    environment:
+      <<: *app-env
+      PORT: 3003
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  lgtm_data:
